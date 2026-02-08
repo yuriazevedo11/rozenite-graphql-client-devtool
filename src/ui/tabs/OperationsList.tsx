@@ -1,7 +1,7 @@
 import { ScrollArea } from '../components/ScrollArea';
 import { Badge } from '../components/Badge';
 import { GraphQLOperation } from '../../shared/types';
-import { Clock, Database } from 'lucide-react';
+import { Clock } from 'lucide-react';
 
 interface OperationsListProps {
   operations: GraphQLOperation[];
@@ -96,12 +96,6 @@ export function OperationsList({
                 <div className="flex items-center gap-1">
                   <Clock className="h-3 w-3" />
                   <span>{operation.duration.toFixed(0)}ms</span>
-                </div>
-              )}
-              {operation.fromCache && (
-                <div className="flex items-center gap-1 text-yellow-400">
-                  <Database className="h-3 w-3" />
-                  <span>Cached</span>
                 </div>
               )}
               <span className="ml-auto">

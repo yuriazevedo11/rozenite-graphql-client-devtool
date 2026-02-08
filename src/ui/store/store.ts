@@ -221,7 +221,6 @@ export const createGraphQLDevToolsStore = () =>
               status: 'success',
               data: eventData.data,
               duration: eventData.duration,
-              fromCache: eventData.fromCache,
             };
 
             const newOperations = new Map(state.operations);

@@ -24,7 +24,6 @@ export type GraphQLDevToolEventMap = {
     id: string;
     data: any;
     duration: number;
-    fromCache?: boolean;
   };
   'operation-error': {
     id: string;

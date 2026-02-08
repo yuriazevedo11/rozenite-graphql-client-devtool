@@ -111,12 +111,6 @@ export function OperationDetailPanel({ operation }: OperationDetailPanelProps) {
                   {new Date(operation.timestamp).toLocaleString()}
                 </span>
               </div>
-              {operation.fromCache && (
-                <div className="flex justify-between text-sm">
-                  <span className="text-gray-400">Source:</span>
-                  <span className="text-yellow-400">Cache</span>
-                </div>
-              )}
               {operation.context && Object.keys(operation.context).length > 0 && (
                 <div className="mt-3">
                   <h5 className="text-xs font-semibold text-gray-400 mb-2">Context:</h5>

@@ -29,7 +29,6 @@ export interface GraphQLOperation {
    * Optional context data (excluded by default to avoid circular references)
    */
   context?: Record<string, any>;
-  fromCache?: boolean;
 }
 
 // Cache entries

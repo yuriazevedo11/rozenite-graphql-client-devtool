@@ -469,7 +469,6 @@ export class ApolloClientAdapter implements GraphQLClientAdapter {
                 message: error.message || 'Query error',
                 extensions: error.extensions,
             } : undefined,
-            fromCache: networkStatus === NetworkStatus.ready && !!cachedData,
         };
     }
 

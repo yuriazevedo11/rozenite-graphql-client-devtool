@@ -51,11 +51,6 @@ interface UseGraphqlClientDevtoolConfig {
  *   clientType: 'apollo',
  * });
  * 
- * // With urql
- * useGraphqlClientDevtool({
- *   client: urqlClient,
- *   clientType: 'urql',
- * });
  * 
  * // With custom adapter
  * useGraphqlClientDevtool({
@@ -127,7 +122,6 @@ export const useGraphqlClientDevtool = (config: UseGraphqlClientDevtoolConfig) =
                     id: operation.id,
                     data: operation.data,
                     duration: operation.duration || 0,
-                    fromCache: operation.fromCache,
                 });
             } else if (operation.status === 'error') {
                 pluginClient.send('operation-error', {

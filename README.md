@@ -138,7 +138,6 @@ Monitor all GraphQL operations in real-time with comprehensive details.
   - Response data in an interactive JSON tree view
   - Error details with location and path information
   - Timing information (duration)
-  - Cache status and fetch policy
 - Color-coded operation types and status badges
 - Clear all operations button
 
