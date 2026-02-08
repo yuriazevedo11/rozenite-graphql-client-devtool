@@ -45,12 +45,25 @@ interface PrivateMutationStoreValue {
     variables: any;
     loading: boolean;
     error: Error | null;
+    data?: any;
+    result?: { data?: any };
 }
 
 interface PrivateQueryManager {
     queries?: Map<string, any>;
     mutationStore?: Record<string, PrivateMutationStoreValue> | { getStore?: () => Record<string, PrivateMutationStoreValue> };
     getObservableQueries?: (include?: 'all' | 'active') => Map<string, any>;
+}
+
+interface PrivateObservableSubscription {
+    query: DocumentNode;
+    variables: any;
+    options?: {
+        query: DocumentNode;
+        variables: any;
+    };
+    _lastResult?: any;
+    _lastError?: any;
 }
 
 interface PrivateApolloClient {
@@ -86,7 +99,15 @@ export class ApolloClientAdapter implements GraphQLClientAdapter {
         error?: any;
         operationId?: string;
     }> = new Map();
-    private trackedMutations: Map<number, boolean> = new Map();
+    private trackedMutations: Map<number, {
+        loading: boolean;
+        operationId: string;
+        startTime: number;
+    }> = new Map();
+    private trackedSubscriptions: Map<string, {
+        lastDataHash: string;
+        operationId: string;
+    }> = new Map();
     private operationCounter = 0;
 
     // ============================================================================
@@ -131,6 +152,7 @@ export class ApolloClientAdapter implements GraphQLClientAdapter {
         this.cacheCallbacks.clear();
         this.trackedQueries.clear();
         this.trackedMutations.clear();
+        this.trackedSubscriptions.clear();
     }
 
     // ============================================================================
@@ -147,11 +169,13 @@ export class ApolloClientAdapter implements GraphQLClientAdapter {
         this.pollInterval = setInterval(() => {
             this.pollQueries();
             this.pollMutations();
+            this.pollSubscriptions();
         }, interval);
 
         // Do an initial poll immediately
         this.pollQueries();
         this.pollMutations();
+        this.pollSubscriptions();
     }
 
     /**
@@ -264,29 +288,86 @@ export class ApolloClientAdapter implements GraphQLClientAdapter {
     private pollMutations(): void {
         try {
             const mutations = this.getMutations();
+            const now = Date.now();
 
             mutations.forEach((mutationDetails, index) => {
-                const wasLoading = this.trackedMutations.get(index);
+                const tracked = this.trackedMutations.get(index);
                 const isLoading = mutationDetails.loading;
 
                 // Track status transitions: loading -> completed
-                if (wasLoading === undefined) {
+                if (!tracked) {
                     // First time seeing this mutation
-                    this.trackedMutations.set(index, isLoading);
-                    if (!isLoading) {
-                        // Mutation already completed, emit it
-                        const operation = this.convertMutationToOperation(mutationDetails, index);
-                        this.notifyOperationCallbacks(operation);
-                    }
-                } else if (wasLoading === true && isLoading === false) {
-                    // Mutation just completed
-                    this.trackedMutations.set(index, false);
-                    const operation = this.convertMutationToOperation(mutationDetails, index);
+                    const uniqueOpId = `mutation-${this.operationCounter++}-${Date.now()}`;
+
+                    this.trackedMutations.set(index, {
+                        loading: isLoading,
+                        operationId: uniqueOpId,
+                        startTime: now,
+                    });
+
+                    // Always emit when first detected
+                    const operation = this.convertMutationToOperation(mutationDetails, index, uniqueOpId, now, undefined);
+                    this.notifyOperationCallbacks(operation);
+                } else if (tracked.loading === true && isLoading === false) {
+                    // Mutation just completed - emit with duration
+                    const duration = now - tracked.startTime;
+                    this.trackedMutations.set(index, {
+                        loading: false,
+                        operationId: tracked.operationId,
+                        startTime: tracked.startTime,
+                    });
+
+                    const operation = this.convertMutationToOperation(mutationDetails, index, tracked.operationId, tracked.startTime, duration);
                     this.notifyOperationCallbacks(operation);
                 }
             });
         } catch (error) {
             console.error('[Apollo Adapter] Error polling mutations:', error);
+        }
+    }
+
+    /**
+     * Poll for active subscriptions
+     */
+    private pollSubscriptions(): void {
+        try {
+            const subscriptions = this.getSubscriptions();
+            
+            console.log('[Apollo Adapter] Polling subscriptions - found:', subscriptions.length);
+
+            subscriptions.forEach((subDetails) => {
+                const subId = subDetails.id;
+                const tracked = this.trackedSubscriptions.get(subId);
+                
+                // Create hash of current data to detect changes
+                const dataHash = JSON.stringify(subDetails.data);
+                
+                console.log('[Apollo Adapter] Subscription:', {
+                    id: subId,
+                    hasData: !!subDetails.data,
+                    hasError: !!subDetails.error,
+                    isNew: !tracked,
+                    dataChanged: tracked ? tracked.lastDataHash !== dataHash : true
+                });
+                
+                if (!tracked || tracked.lastDataHash !== dataHash) {
+                    // New subscription or new data received
+                    const uniqueOpId = `subscription-${this.operationCounter++}-${Date.now()}`;
+                    
+                    this.trackedSubscriptions.set(subId, {
+                        lastDataHash: dataHash,
+                        operationId: uniqueOpId,
+                    });
+                    
+                    console.log('[Apollo Adapter] Emitting subscription operation:', uniqueOpId);
+                    
+                    // Emit operation for this subscription event
+                    const operation = this.convertSubscriptionToOperation(subDetails, uniqueOpId);
+                    this.notifyOperationCallbacks(operation);
+                }
+            });
+        } catch (error) {
+            console.error('[Apollo Adapter] Error polling subscriptions:', error);
         }
     }
 
@@ -389,6 +470,78 @@ export class ApolloClientAdapter implements GraphQLClientAdapter {
     }
 
     /**
+     * Get active subscriptions from Apollo Client
+     */
+    private getSubscriptions(): Array<{
+        id: string;
+        document: DocumentNode;
+        variables: any;
+        data?: any;
+        error?: any;
+    }> {
+        try {
+            const subscriptions: Array<any> = [];
+            const queryManager = this.privateClient.queryManager as any;
+
+            // Try to access observable queries and filter for subscriptions
+            let observableQueries: Map<string, any> | undefined;
+
+            if (this.privateClient.getObservableQueries) {
+                observableQueries = this.privateClient.getObservableQueries('active');
+            } else if (queryManager?.getObservableQueries) {
+                observableQueries = queryManager.getObservableQueries('active');
+            }
+
+            console.log('[Apollo Adapter] getSubscriptions - observableQueries size:', observableQueries?.size || 0);
+            
+            // Debug: Check for alternative subscription tracking
+            console.log('[Apollo Adapter] Checking for subscriptions in:', {
+                hasLocalState: !!(this.client as any).localState,
+                hasSubscriptions: !!queryManager.subscriptions,
+                hasObservableSubscriptions: !!(this.client as any).subscriptions,
+                clientKeys: Object.keys(this.client).filter(k => k.toLowerCase().includes('sub')),
+                queryManagerKeys: Object.keys(queryManager).filter(k => k.toLowerCase().includes('sub')),
+            });
+
+            if (observableQueries) {
+                observableQueries.forEach((oq: any, queryId: string) => {
+                    try {
+                        // Check if this is a subscription by looking at the operation type
+                        const document = oq.queryInfo?.document || oq.query;
+                        const operationDef = document?.definitions?.find((def: any) => 
+                            def.kind === 'OperationDefinition'
+                        );
+                        
+                        const operationType = operationDef?.operation;
+                        console.log('[Apollo Adapter] Observable query:', queryId, 'type:', operationType);
+                        
+                        if (operationType === 'subscription') {
+                            const result = oq.getCurrentResult?.(false);
+                            const subData = {
+                                id: queryId,
+                                document,
+                                variables: oq.queryInfo?.variables || oq.variables,
+                                data: result?.data || oq._lastResult?.data,
+                                error: result?.error || oq._lastError,
+                            };
+                            console.log('[Apollo Adapter] Found subscription:', queryId, 'hasData:', !!subData.data);
+                            subscriptions.push(subData);
+                        }
+                    } catch (err) {
+                        console.warn('[Apollo Adapter] Error processing subscription:', err);
+                    }
+                });
+            }
+
+            console.log('[Apollo Adapter] getSubscriptions returning:', subscriptions.length, 'subscriptions');
+            return subscriptions;
+        } catch (error) {
+            console.error('[Apollo Adapter] Error getting subscriptions:', error);
+            return [];
+        }
+    }
+
+    /**
      * Get mutations from Apollo Client
      */
     private getMutations(): Array<PrivateMutationStoreValue> {
@@ -410,7 +563,19 @@ export class ApolloClientAdapter implements GraphQLClientAdapter {
                 mutationsObj = mutationStore as Record<string, PrivateMutationStoreValue>;
             }
 
-            return Object.values(mutationsObj);
+            const mutations = Object.values(mutationsObj);
+            
+            // Debug: Log first mutation structure to understand available fields
+            if (mutations.length > 0) {
+                console.log('[Apollo Adapter] Mutation store sample:', {
+                    keys: Object.keys(mutations[0]),
+                    hasData: 'data' in mutations[0],
+                    hasResult: 'result' in mutations[0],
+                    loading: mutations[0].loading,
+                });
+            }
+            
+            return mutations;
         } catch (error) {
             console.error('[Apollo Adapter] Error getting mutations:', error);
             return [];
@@ -475,28 +640,69 @@ export class ApolloClientAdapter implements GraphQLClientAdapter {
     /**
      * Convert mutation details to GraphQLOperation
      */
-    private convertMutationToOperation(mutationDetails: PrivateMutationStoreValue, index: number): GraphQLOperation {
-        const { mutation, variables, loading, error } = mutationDetails;
+    private convertMutationToOperation(
+        mutationDetails: PrivateMutationStoreValue,
+        index: number,
+        operationId: string,
+        startTime: number,
+        duration: number | undefined
+    ): GraphQLOperation {
+        const { mutation, variables, loading, error, data, result } = mutationDetails;
 
         // Extract operation name from document (search all definitions to handle fragments)
         const operationDef = mutation.definitions?.find((def: any) => def.kind === 'OperationDefinition');
         const operationName = operationDef?.name?.value || 'Unnamed Mutation';
 
-        // Generate unique ID for each mutation execution
-        const uniqueId = `mutation-${this.operationCounter++}-${Date.now()}`;
+        // Get response data from either data or result.data
+        const responseData = data || result?.data;
 
         return {
-            id: uniqueId,
+            id: operationId,
             operationName,
             operationType: 'mutation',
             query: print(mutation),
             variables: this.config.includeVariables ? variables : undefined,
-            timestamp: Date.now(),
+            timestamp: startTime,
             status: error ? 'error' : loading ? 'loading' : 'success',
-            // Mutations typically complete quickly, but we don't have precise timing in polling mode
-            duration: loading ? undefined : 100, // Estimate ~100ms for completed mutations
+            duration,
+            data: this.config.includeResponseData ? responseData : undefined,
             error: error ? {
                 message: error.message || 'Mutation error',
+            } : undefined,
+        };
+    }
+
+    /**
+     * Convert subscription details to GraphQLOperation
+     */
+    private convertSubscriptionToOperation(
+        subDetails: {
+            id: string;
+            document: DocumentNode;
+            variables: any;
+            data?: any;
+            error?: any;
+        },
+        operationId: string
+    ): GraphQLOperation {
+        const { document, variables, data, error } = subDetails;
+
+        // Extract operation name from document
+        const operationDef = document.definitions?.find((def: any) => def.kind === 'OperationDefinition');
+        const operationName = operationDef?.name?.value || 'Unnamed Subscription';
+
+        return {
+            id: operationId,
+            operationName,
+            operationType: 'subscription',
+            query: print(document),
+            variables: this.config.includeVariables ? variables : undefined,
+            timestamp: Date.now(),
+            status: error ? 'error' : 'success',
+            duration: 0,
+            data: this.config.includeResponseData ? data : undefined,
+            error: error ? {
+                message: error.message || 'Subscription error',
             } : undefined,
         };
     }

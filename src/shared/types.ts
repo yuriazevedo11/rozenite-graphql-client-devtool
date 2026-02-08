@@ -57,8 +57,8 @@ export interface GraphQLField {
   deprecationReason?: string;
 }
 
-export type GraphQLTypeKind = 
-  | 'OBJECT' 
+export type GraphQLTypeKind =
+  | 'OBJECT'
   | 'INTERFACE'
   | 'UNION'
   | 'ENUM'

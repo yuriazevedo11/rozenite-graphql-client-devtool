@@ -48,7 +48,9 @@ export function OperationsList({
         <div className="text-center">
           <div className="text-4xl mb-2">📭</div>
           <p className="text-sm">No operations yet</p>
-          <p className="text-xs mt-1">Execute a GraphQL operation to see it here</p>
+          <p className="text-xs mt-1">
+            Execute a GraphQL operation to see it here
+          </p>
         </div>
       </div>
     );
@@ -56,7 +58,7 @@ export function OperationsList({
 
   // Sort operations by timestamp (newest first)
   const sortedOperations = [...operations].sort(
-    (a, b) => b.timestamp - a.timestamp
+    (a, b) => b.timestamp - a.timestamp,
   );
 
   return (
@@ -66,7 +68,9 @@ export function OperationsList({
           <div
             key={operation.id}
             className={`p-3 cursor-pointer hover:bg-gray-800 transition-colors ${
-              selectedId === operation.id ? 'bg-gray-800 border-l-2 border-blue-500' : ''
+              selectedId === operation.id
+                ? 'bg-gray-800 border-l-2 border-blue-500'
+                : ''
             }`}
             onClick={() => onSelect(operation.id)}
           >
@@ -74,7 +78,7 @@ export function OperationsList({
               <div className="flex items-center gap-2 flex-1 min-w-0">
                 <span
                   className={`text-xs font-mono font-semibold uppercase ${getOperationTypeColor(
-                    operation.operationType
+                    operation.operationType,
                   )}`}
                 >
                   {operation.operationType}
@@ -108,4 +112,3 @@ export function OperationsList({
     </ScrollArea>
   );
 }
-

@@ -37,7 +37,8 @@ export function OperationDetailPanel({ operation }: OperationDetailPanelProps) {
           </TabsContent>
 
           <TabsContent value="variables" className="p-3">
-            {operation.variables && Object.keys(operation.variables).length > 0 ? (
+            {operation.variables &&
+            Object.keys(operation.variables).length > 0 ? (
               <div className="bg-gray-800 p-3 rounded">
                 <JsonTree
                   data={operation.variables}
@@ -54,12 +55,18 @@ export function OperationDetailPanel({ operation }: OperationDetailPanelProps) {
           <TabsContent value="response" className="p-3">
             {operation.status === 'error' && operation.error ? (
               <div className="bg-red-900/20 border border-red-800 rounded p-3">
-                <h4 className="text-red-400 font-semibold text-sm mb-2">Error</h4>
-                <p className="text-red-300 text-sm mb-3">{operation.error.message}</p>
+                <h4 className="text-red-400 font-semibold text-sm mb-2">
+                  Error
+                </h4>
+                <p className="text-red-300 text-sm mb-3">
+                  {operation.error.message}
+                </p>
                 {operation.error.locations && (
                   <div className="text-xs text-red-400 mb-2">
                     <strong>Location:</strong>{' '}
-                    {operation.error.locations.map((loc) => `Line ${loc.line}, Column ${loc.column}`).join('; ')}
+                    {operation.error.locations
+                      .map((loc) => `Line ${loc.line}, Column ${loc.column}`)
+                      .join('; ')}
                   </div>
                 )}
                 {operation.error.path && (
@@ -69,7 +76,9 @@ export function OperationDetailPanel({ operation }: OperationDetailPanelProps) {
                 )}
                 {operation.error.extensions && (
                   <div className="mt-3">
-                    <h5 className="text-xs font-semibold text-red-400 mb-1">Extensions:</h5>
+                    <h5 className="text-xs font-semibold text-red-400 mb-1">
+                      Extensions:
+                    </h5>
                     <JsonTree data={operation.error.extensions} />
                   </div>
                 )}
@@ -83,7 +92,8 @@ export function OperationDetailPanel({ operation }: OperationDetailPanelProps) {
               </div>
             ) : (
               <div className="text-gray-400 text-sm text-center py-8">
-                {operation.status === 'loading' || operation.status === 'pending'
+                {operation.status === 'loading' ||
+                operation.status === 'pending'
                   ? 'Loading...'
                   : 'No response data'}
               </div>
@@ -99,11 +109,14 @@ export function OperationDetailPanel({ operation }: OperationDetailPanelProps) {
               {operation.duration !== undefined && (
                 <div className="flex justify-between text-sm">
                   <span className="text-gray-400">Duration:</span>
-                  <span className="text-gray-200">{operation.duration.toFixed(2)}ms</span>
+                  <span className="text-gray-200">
+                    {operation.duration.toFixed(2)}ms
+                  </span>
                 </div>
               )}
               <div className="text-xs text-gray-500 italic mt-2 mb-2">
-                Note: Duration values are approximate and may not reflect exact operation timing.
+                Note: Duration values are approximate and may not reflect exact
+                operation timing.
               </div>
               <div className="flex justify-between text-sm">
                 <span className="text-gray-400">Timestamp:</span>
@@ -111,12 +124,15 @@ export function OperationDetailPanel({ operation }: OperationDetailPanelProps) {
                   {new Date(operation.timestamp).toLocaleString()}
                 </span>
               </div>
-              {operation.context && Object.keys(operation.context).length > 0 && (
-                <div className="mt-3">
-                  <h5 className="text-xs font-semibold text-gray-400 mb-2">Context:</h5>
-                  <JsonTree data={operation.context} />
-                </div>
-              )}
+              {operation.context &&
+                Object.keys(operation.context).length > 0 && (
+                  <div className="mt-3">
+                    <h5 className="text-xs font-semibold text-gray-400 mb-2">
+                      Context:
+                    </h5>
+                    <JsonTree data={operation.context} />
+                  </div>
+                )}
             </div>
           </TabsContent>
         </ScrollArea>
@@ -124,4 +140,3 @@ export function OperationDetailPanel({ operation }: OperationDetailPanelProps) {
     </div>
   );
 }
-
