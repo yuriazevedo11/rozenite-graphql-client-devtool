@@ -332,16 +332,16 @@ export class ApolloClientAdapter implements GraphQLClientAdapter {
     private pollSubscriptions(): void {
         try {
             const subscriptions = this.getSubscriptions();
-            
+
             console.log('[Apollo Adapter] Polling subscriptions - found:', subscriptions.length);
 
             subscriptions.forEach((subDetails) => {
                 const subId = subDetails.id;
                 const tracked = this.trackedSubscriptions.get(subId);
-                
+
                 // Create hash of current data to detect changes
                 const dataHash = JSON.stringify(subDetails.data);
-                
+
                 console.log('[Apollo Adapter] Subscription:', {
                     id: subId,
                     hasData: !!subDetails.data,
@@ -349,18 +349,18 @@ export class ApolloClientAdapter implements GraphQLClientAdapter {
                     isNew: !tracked,
                     dataChanged: tracked ? tracked.lastDataHash !== dataHash : true
                 });
-                
+
                 if (!tracked || tracked.lastDataHash !== dataHash) {
                     // New subscription or new data received
                     const uniqueOpId = `subscription-${this.operationCounter++}-${Date.now()}`;
-                    
+
                     this.trackedSubscriptions.set(subId, {
                         lastDataHash: dataHash,
                         operationId: uniqueOpId,
                     });
-                    
+
                     console.log('[Apollo Adapter] Emitting subscription operation:', uniqueOpId);
-                    
+
                     // Emit operation for this subscription event
                     const operation = this.convertSubscriptionToOperation(subDetails, uniqueOpId);
                     this.notifyOperationCallbacks(operation);
@@ -493,7 +493,7 @@ export class ApolloClientAdapter implements GraphQLClientAdapter {
             }
 
             console.log('[Apollo Adapter] getSubscriptions - observableQueries size:', observableQueries?.size || 0);
-            
+
             // Debug: Check for alternative subscription tracking
             console.log('[Apollo Adapter] Checking for subscriptions in:', {
                 hasLocalState: !!(this.client as any).localState,
@@ -508,13 +508,13 @@ export class ApolloClientAdapter implements GraphQLClientAdapter {
                     try {
                         // Check if this is a subscription by looking at the operation type
                         const document = oq.queryInfo?.document || oq.query;
-                        const operationDef = document?.definitions?.find((def: any) => 
+                        const operationDef = document?.definitions?.find((def: any) =>
                             def.kind === 'OperationDefinition'
                         );
-                        
+
                         const operationType = operationDef?.operation;
                         console.log('[Apollo Adapter] Observable query:', queryId, 'type:', operationType);
-                        
+
                         if (operationType === 'subscription') {
                             const result = oq.getCurrentResult?.(false);
                             const subData = {
@@ -564,7 +564,7 @@ export class ApolloClientAdapter implements GraphQLClientAdapter {
             }
 
             const mutations = Object.values(mutationsObj);
-            
+
             // Debug: Log first mutation structure to understand available fields
             if (mutations.length > 0) {
                 console.log('[Apollo Adapter] Mutation store sample:', {
@@ -574,7 +574,7 @@ export class ApolloClientAdapter implements GraphQLClientAdapter {
                     loading: mutations[0].loading,
                 });
             }
-            
+
             return mutations;
         } catch (error) {
             console.error('[Apollo Adapter] Error getting mutations:', error);
