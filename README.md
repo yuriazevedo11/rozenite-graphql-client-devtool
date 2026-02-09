@@ -7,7 +7,7 @@ A powerful debugging plugin for GraphQL clients in React Native applications, bu
 
 ## 📺 Demo
 
-https://github.com/user-attachments/assets/preview.mov
+![preview-ezgif com-video-to-webp-converter (3)](https://github.com/user-attachments/assets/72b440dc-5580-4c03-9881-2388ea8012d7)
 
 ---
 
