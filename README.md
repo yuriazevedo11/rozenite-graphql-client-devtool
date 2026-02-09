@@ -7,12 +7,7 @@ A powerful debugging plugin for GraphQL clients in React Native applications, bu
 
 ## 📺 Demo
 
-> **Coming Soon!** A comprehensive video demonstration will be added here showcasing all features and capabilities of the GraphQL Client DevTool in action.
-
-<!-- 
-📽️ Video Demo will be inserted here
-Placeholder for video embed or link
--->
+https://github.com/user-attachments/assets/preview.mov
 
 ---
 
