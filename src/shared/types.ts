@@ -1,6 +1,6 @@
 // Core operation types
 export type OperationType = 'query' | 'mutation' | 'subscription';
-export type OperationStatus = 'pending' | 'loading' | 'success' | 'error';
+export type OperationStatus = 'pending' | 'loading' | 'success' | 'error' | 'active';
 
 // GraphQL Error type
 export interface GraphQLError {
@@ -29,6 +29,16 @@ export interface GraphQLOperation {
    * Optional context data (excluded by default to avoid circular references)
    */
   context?: Record<string, any>;
+  /**
+   * Optional metadata for subscriptions
+   */
+  metadata?: {
+    parentId?: string;      // ID of the parent subscription (for events)
+    eventNumber?: number;   // Event number for subscription events
+    eventCount?: number;    // Total events received (for parent subscription)
+    isActive?: boolean;     // Whether subscription is still active
+    completed?: boolean;    // Whether subscription has completed
+  };
 }
 
 // Cache entries

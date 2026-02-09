@@ -101,19 +101,20 @@ export const useGraphqlClientDevtool = (config: UseGraphqlClientDevtoolConfig) =
         adapterRef.current = adapter;
         adapter.initialize();
 
+        // Enable recording immediately when adapter is created
+        isRecordingRef.current = true;
+
         // Set up operation tracking
         const unsubscribeOperation = adapter.onOperation((operation) => {
             // Only gate loading events with recording state to prevent orphaned operations
             // Always process completion/error events to avoid stuck loading states
-            if (!isRecordingRef.current && (operation.status === 'loading' || !operation.status)) {
+            if (!isRecordingRef.current && (operation.status === 'loading' || operation.status === 'active' || !operation.status)) {
                 return;
             }
 
-            if (operation.status === 'loading' || !operation.status) {
+            if (operation.status === 'loading' || operation.status === 'active' || !operation.status) {
                 pluginClient.send('operation-start', { operation });
             }
-
-            console.log('[GraphQL DevTools] Tracked operation:', operation.id, operation.status);
 
             // Handle completed operations
             // Note: Don't check for truthy data/error values - they can be null, undefined, false, 0, etc.
@@ -195,9 +196,6 @@ export const useGraphqlClientDevtool = (config: UseGraphqlClientDevtoolConfig) =
                 // Operations are managed by the panel, so nothing to do here
             }),
         ];
-
-        // Enable recording by default
-        isRecordingRef.current = true;
 
         // Send initial cache snapshot
         const entries = adapter.getCacheSnapshot();

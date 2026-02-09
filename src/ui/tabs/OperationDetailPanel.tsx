@@ -114,10 +114,7 @@ export function OperationDetailPanel({ operation }: OperationDetailPanelProps) {
                   </span>
                 </div>
               )}
-              <div className="text-xs text-gray-500 italic mt-2 mb-2">
-                Note: Duration values are approximate and may not reflect exact
-                operation timing.
-              </div>
+
               <div className="flex justify-between text-sm">
                 <span className="text-gray-400">Timestamp:</span>
                 <span className="text-gray-200">

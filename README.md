@@ -63,18 +63,33 @@ npm install @apollo/client graphql
 
 ## 🚀 Quick Start
 
-```typescript
-import { ApolloClient, InMemoryCache, ApolloProvider } from '@apollo/client';
-import { useGraphqlClientDevtool } from 'rozenite-graphql-client-devtool';
+### Apollo Client Setup
 
-// Create your Apollo Client
-const client = new ApolloClient({
+For complete operation tracking (including mutation responses and subscriptions), you need to add the Link to your Apollo Client configuration:
+
+```typescript
+import { ApolloClient, InMemoryCache, ApolloLink, HttpLink, ApolloProvider } from '@apollo/client';
+import { apolloGraphqlDevtoolLink, useGraphqlClientDevtool } from 'rozenite-graphql-client-devtool';
+
+// 1. Create the DevToolLink Link
+const devToolLink = apolloGraphqlDevtoolLink();
+
+// 2. Create your HTTP Link
+const httpLink = new HttpLink({
   uri: 'https://api.example.com/graphql',
+});
+
+// 3. Combine links - Rozenite Link MUST be first
+const client = new ApolloClient({
+  link: ApolloLink.from([
+    devToolLink,  // ⚠️ IMPORTANT: Must be first to capture all operations
+    httpLink,
+  ]),
   cache: new InMemoryCache(),
 });
 
 function App() {
-  // Initialize the devtool
+  // 4. Initialize the devtool
   useGraphqlClientDevtool({
     client,
     clientType: 'apollo',
@@ -88,6 +103,7 @@ function App() {
 }
 ```
 
+ 
 ---
 
 ## 🔧 Configuration
@@ -173,7 +189,7 @@ Browse your GraphQL schema and available operations.
 
 ---
 
-## 🔌 Custom Adapters
+## 🔌 Custom Adapters (Work in Progress)
 
 If you're using a GraphQL client that isn't Apollo, you can create a custom adapter.
 
@@ -270,28 +286,7 @@ interface GraphQLClientAdapter {
 }
 ```
  
-
----
-
-## 🛠️ Development
-
-### Building the Plugin
-
-```bash
-# Install dependencies
-pnpm install
-
-# Build for production
-pnpm build
-
-# Development mode with hot reload
-pnpm dev
-```
-
-### Project Structure
-
-The plugin uses Vite for building and Rozenite's plugin architecture for seamless integration with the DevTools platform.
-
+ 
 ---
 
 ## 📚 TypeScript Support
@@ -319,7 +314,7 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 MIT 
 
----
+ 
 
  
 ---
@@ -334,7 +329,6 @@ For issues, questions, or feature requests, please file an issue.
 
 - [ ] **URQL client support**  
 - [ ] **Relay Modern support**
--
 ---
 
 **Made with ❤️ for React Native developers**

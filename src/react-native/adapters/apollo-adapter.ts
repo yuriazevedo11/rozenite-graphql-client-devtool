@@ -5,7 +5,7 @@ import {
     OperationType,
 } from '../../shared/types';
 import { GraphQLClientAdapter, AdapterConfig } from './types';
-import { gql, ApolloClient as ApolloClientType, NetworkStatus } from '@apollo/client';
+import { gql, ApolloClient as ApolloClientType, ApolloLink, Observable, FetchResult, Operation } from '@apollo/client';
 import {
     getIntrospectionQuery,
     buildClientSchema,
@@ -15,99 +15,41 @@ import {
     isEnumType,
     isInputObjectType,
     isScalarType,
-    type DocumentNode,
     print,
 } from 'graphql';
 
 // Type alias for Apollo Client
 type ApolloClient = ApolloClientType<any>;
 
-// Private Apollo Client interfaces
-interface PrivateObservableQuery {
-    query: DocumentNode;
-    variables: any;
-    queryInfo?: {
-        document: DocumentNode;
-        variables: any;
-        getDiff: () => { result: any };
-    };
-    pollingInfo?: { interval: number };
-    getCurrentResult: (saveLastResult?: boolean) => {
-        networkStatus: NetworkStatus;
-        error?: any;
-        data?: any;
-    };
-    getCacheDiff?: () => { result: any };
-}
-
-interface PrivateMutationStoreValue {
-    mutation: DocumentNode;
-    variables: any;
-    loading: boolean;
-    error: Error | null;
-    data?: any;
-    result?: { data?: any };
-}
-
-interface PrivateQueryManager {
-    queries?: Map<string, any>;
-    mutationStore?: Record<string, PrivateMutationStoreValue> | { getStore?: () => Record<string, PrivateMutationStoreValue> };
-    getObservableQueries?: (include?: 'all' | 'active') => Map<string, any>;
-}
-
-interface PrivateObservableSubscription {
-    query: DocumentNode;
-    variables: any;
-    options?: {
-        query: DocumentNode;
-        variables: any;
-    };
-    _lastResult?: any;
-    _lastError?: any;
-}
-
-interface PrivateApolloClient {
-    queryManager: PrivateQueryManager;
-    getObservableQueries?: (include?: 'all' | 'active') => Map<string, PrivateObservableQuery>;
-}
-
 /**
  * Apollo Client adapter for the GraphQL DevTools plugin.
  * 
- * This adapter integrates with Apollo Client using a polling-based approach,
- * similar to the official Apollo DevTools browser extension.
- * Instead of relying on __actionHookForDevTools (which was disabled in Apollo DevTools 4.4.3),
- * we poll the queryManager every 500ms to get the current state of queries and mutations.
+ * This adapter integrates with Apollo Client using Apollo Link middleware
+ * to intercept all GraphQL operations with full request/response lifecycle tracking.
  * 
- * @example
+ * IMPORTANT: Add the Rozenite link as the FIRST link in your Apollo Client chain:
  * ```typescript
- * const adapter = new ApolloClientAdapter(apolloClient);
+ * import { ApolloClient, InMemoryCache, ApolloLink, HttpLink } from '@apollo/client';
+ * import { apolloGraphqlDevtoolLink } from 'rozenite-graphql-client-devtool';
+ * 
+ * const client = new ApolloClient({
+ *   link: ApolloLink.from([
+ *     apolloGraphqlDevtoolLink(),  // Must be first to capture all operations
+ *     new HttpLink({ uri: 'https://api.example.com/graphql' }),
+ *   ]),
+ *   cache: new InMemoryCache(),
+ * });
+ * 
+ * // Then initialize the adapter
+ * const adapter = new ApolloClientAdapter(client);
  * adapter.initialize();
  * ```
  */
 export class ApolloClientAdapter implements GraphQLClientAdapter {
     private client: ApolloClient;
-    private privateClient: PrivateApolloClient;
     private config: Required<AdapterConfig>;
     private operationCallbacks: Set<(operation: GraphQLOperation) => void> = new Set();
     private cacheCallbacks: Set<(entry: CacheEntry) => void> = new Set();
-    private pollInterval: NodeJS.Timeout | null = null;
-    private trackedQueries: Map<string, {
-        status: 'loading' | 'success' | 'error';
-        startTime: number;
-        data?: any;
-        error?: any;
-        operationId?: string;
-    }> = new Map();
-    private trackedMutations: Map<number, {
-        loading: boolean;
-        operationId: string;
-        startTime: number;
-    }> = new Map();
-    private trackedSubscriptions: Map<string, {
-        lastDataHash: string;
-        operationId: string;
-    }> = new Map();
     private operationCounter = 0;
 
     // ============================================================================
@@ -116,7 +58,6 @@ export class ApolloClientAdapter implements GraphQLClientAdapter {
 
     constructor(client: ApolloClient, config: AdapterConfig = {}) {
         this.client = client;
-        this.privateClient = client as any as PrivateApolloClient;
         this.config = {
             includeVariables: config.includeVariables ?? true,
             includeResponseData: config.includeResponseData ?? true,
@@ -130,581 +71,158 @@ export class ApolloClientAdapter implements GraphQLClientAdapter {
 
     initialize(): void {
         try {
-            console.log('[Apollo Adapter] Initializing polling-based adapter (like official Apollo DevTools)');
-
-            // Start polling queries and mutations every 500ms
-            this.startPolling();
-
-            console.log('[Apollo Adapter] Polling started successfully');
+            // Register this adapter globally so the link can find it
+            (globalThis as any).__ROZENITE_APOLLO_ADAPTER__ = this;
         } catch (error) {
             console.error('[Apollo Adapter] Failed to initialize:', error);
         }
     }
 
     cleanup(): void {
-        // Stop polling
-        if (this.pollInterval) {
-            clearInterval(this.pollInterval);
-            this.pollInterval = null;
-        }
-
         this.operationCallbacks.clear();
         this.cacheCallbacks.clear();
-        this.trackedQueries.clear();
-        this.trackedMutations.clear();
-        this.trackedSubscriptions.clear();
+
+        // Unregister global adapter
+        if ((globalThis as any).__ROZENITE_APOLLO_ADAPTER__ === this) {
+            delete (globalThis as any).__ROZENITE_APOLLO_ADAPTER__;
+        }
     }
 
     // ============================================================================
-    // Polling Methods
+    // Apollo Link Methods (Internal)
     // ============================================================================
 
     /**
-     * Start polling for queries and mutations.
-     * This is how the official Apollo DevTools tracks operations in version 4.4.3+
+     * Internal method to track an operation through the link
      */
-    private startPolling(): void {
-        const interval = this.config.pollInterval ?? 500;
-        // Poll at configured interval (default 500ms, same as official Apollo DevTools)
-        this.pollInterval = setInterval(() => {
-            this.pollQueries();
-            this.pollMutations();
-            this.pollSubscriptions();
-        }, interval);
+    trackOperation(operation: Operation, forward: any): Observable<FetchResult> {
+        const startTime = Date.now();
+        const baseOperationId = `${operation.operationName || 'anonymous'}-${this.operationCounter++}-${startTime}`;
 
-        // Do an initial poll immediately
-        this.pollQueries();
-        this.pollMutations();
-        this.pollSubscriptions();
-    }
+        // Extract operation details
+        const operationDef = operation.query.definitions.find(
+            (def: any) => def.kind === 'OperationDefinition'
+        ) as any;
+        const operationType = operationDef?.operation || 'query';
 
-    /**
-     * Poll for active queries
-     */
-    private pollQueries(): void {
-        try {
-            const queries = this.getQueries();
-            const currentQueryIds = new Set<string>();
+        const isSubscription = operationType === 'subscription';
 
-            queries.forEach((queryDetails) => {
-                const queryId = queryDetails.id;
-                currentQueryIds.add(queryId);
-
-                // Determine current status
-                let currentStatus: 'loading' | 'success' | 'error';
-                if (queryDetails.error) {
-                    currentStatus = 'error';
-                } else if (queryDetails.networkStatus === NetworkStatus.loading ||
-                    queryDetails.networkStatus === NetworkStatus.setVariables ||
-                    queryDetails.networkStatus === NetworkStatus.fetchMore ||
-                    queryDetails.networkStatus === NetworkStatus.refetch) {
-                    currentStatus = 'loading';
-                } else {
-                    currentStatus = 'success';
-                }
-
-                const tracked = this.trackedQueries.get(queryId);
-                const now = Date.now();
-
-                if (!tracked) {
-                    // First time seeing this query - start tracking
-                    const uniqueOpId = `query-${this.operationCounter++}-${Date.now()}`;
-                    const currentData = queryDetails.data || queryDetails.cachedData;
-
-                    this.trackedQueries.set(queryId, {
-                        status: currentStatus,
-                        startTime: now,
-                        data: currentData,
-                        error: queryDetails.error,
-                        operationId: uniqueOpId,
-                    });
-
-                    // Only emit if it's loading (we'll emit completed state on transition)
-                    if (currentStatus === 'loading') {
-                        const operation = this.convertQueryToOperation(queryDetails, now, undefined, uniqueOpId, currentData);
-                        this.notifyOperationCallbacks(operation);
-                    }
-                } else if (tracked.status !== currentStatus) {
-                    // Status changed - this is a state transition we should track
-                    const currentData = queryDetails.data || queryDetails.cachedData;
-
-                    if (tracked.status === 'loading' && currentStatus !== 'loading') {
-                        // Loading → Success/Error: Emit completed operation with duration
-                        const duration = now - tracked.startTime;
-                        const operation = this.convertQueryToOperation(queryDetails, tracked.startTime, duration, tracked.operationId, currentData);
-                        this.notifyOperationCallbacks(operation);
-                    } else if (currentStatus === 'loading') {
-                        // New loading state (refetch) - generate new operation ID
-                        const uniqueOpId = `query-${this.operationCounter++}-${Date.now()}`;
-                        tracked.operationId = uniqueOpId;
-                        // When starting a new fetch, we'll show incremental data on completion
-                        const operation = this.convertQueryToOperation(queryDetails, now, undefined, uniqueOpId, currentData);
-                        this.notifyOperationCallbacks(operation);
-                    }
-
-                    // Update tracking
-                    this.trackedQueries.set(queryId, {
-                        status: currentStatus,
-                        startTime: currentStatus === 'loading' ? now : tracked.startTime,
-                        data: currentData,
-                        error: queryDetails.error,
-                        operationId: tracked.operationId,
-                    });
-                } else if (currentStatus === 'success' && tracked.data !== (queryDetails.data || queryDetails.cachedData)) {
-                    // Data changed but status stayed success - this is a refetch/update without loading state
-                    // Generate new operation for this fetch
-                    const uniqueOpId = `query-${this.operationCounter++}-${Date.now()}`;
-                    const duration = 50; // Estimate for cache/instant updates
-                    const currentData = queryDetails.data || queryDetails.cachedData;
-
-                    this.trackedQueries.set(queryId, {
-                        status: currentStatus,
-                        startTime: now,
-                        data: currentData,
-                        error: queryDetails.error,
-                        operationId: uniqueOpId,
-                    });
-
-                    // Emit as new operation with current data
-                    const operation = this.convertQueryToOperation(queryDetails, now - duration, duration, uniqueOpId, currentData);
-                    this.notifyOperationCallbacks(operation);
-                }
-            });
-
-            // Clean up queries that no longer exist
-            for (const [queryId] of this.trackedQueries) {
-                if (!currentQueryIds.has(queryId)) {
-                    this.trackedQueries.delete(queryId);
-                }
-            }
-        } catch (error) {
-            console.error('[Apollo Adapter] Error polling queries:', error);
-        }
-    }
-
-    /**
-     * Poll for mutations
-     */
-    private pollMutations(): void {
-        try {
-            const mutations = this.getMutations();
-            const now = Date.now();
-
-            mutations.forEach((mutationDetails, index) => {
-                const tracked = this.trackedMutations.get(index);
-                const isLoading = mutationDetails.loading;
-
-                // Track status transitions: loading -> completed
-                if (!tracked) {
-                    // First time seeing this mutation
-                    const uniqueOpId = `mutation-${this.operationCounter++}-${Date.now()}`;
-
-                    this.trackedMutations.set(index, {
-                        loading: isLoading,
-                        operationId: uniqueOpId,
-                        startTime: now,
-                    });
-
-                    // Always emit when first detected
-                    const operation = this.convertMutationToOperation(mutationDetails, index, uniqueOpId, now, undefined);
-                    this.notifyOperationCallbacks(operation);
-                } else if (tracked.loading === true && isLoading === false) {
-                    // Mutation just completed - emit with duration
-                    const duration = now - tracked.startTime;
-                    this.trackedMutations.set(index, {
-                        loading: false,
-                        operationId: tracked.operationId,
-                        startTime: tracked.startTime,
-                    });
-
-                    const operation = this.convertMutationToOperation(mutationDetails, index, tracked.operationId, tracked.startTime, duration);
-                    this.notifyOperationCallbacks(operation);
-                }
-            });
-        } catch (error) {
-            console.error('[Apollo Adapter] Error polling mutations:', error);
-        }
-    }
-
-    /**
-     * Poll for active subscriptions
-     */
-    private pollSubscriptions(): void {
-        try {
-            const subscriptions = this.getSubscriptions();
-
-            console.log('[Apollo Adapter] Polling subscriptions - found:', subscriptions.length);
-
-            subscriptions.forEach((subDetails) => {
-                const subId = subDetails.id;
-                const tracked = this.trackedSubscriptions.get(subId);
-
-                // Create hash of current data to detect changes
-                const dataHash = JSON.stringify(subDetails.data);
-
-                console.log('[Apollo Adapter] Subscription:', {
-                    id: subId,
-                    hasData: !!subDetails.data,
-                    hasError: !!subDetails.error,
-                    isNew: !tracked,
-                    dataChanged: tracked ? tracked.lastDataHash !== dataHash : true
-                });
-
-                if (!tracked || tracked.lastDataHash !== dataHash) {
-                    // New subscription or new data received
-                    const uniqueOpId = `subscription-${this.operationCounter++}-${Date.now()}`;
-
-                    this.trackedSubscriptions.set(subId, {
-                        lastDataHash: dataHash,
-                        operationId: uniqueOpId,
-                    });
-
-                    console.log('[Apollo Adapter] Emitting subscription operation:', uniqueOpId);
-
-                    // Emit operation for this subscription event
-                    const operation = this.convertSubscriptionToOperation(subDetails, uniqueOpId);
-                    this.notifyOperationCallbacks(operation);
-                }
-            });
-        } catch (error) {
-            console.error('[Apollo Adapter] Error polling subscriptions:', error);
-        }
-    }
-
-    /**
-     * Get queries from Apollo Client (Apollo Client 3.x and 4.x compatible)
-     */
-    private getQueries(): Array<{
-        id: string;
-        document: DocumentNode;
-        variables: any;
-        cachedData: any;
-        networkStatus: NetworkStatus;
-        error?: any;
-        pollInterval?: number;
-    }> {
-        try {
-            const queryManager = this.privateClient.queryManager;
-
-            // Try Apollo Client 3.4+ method
-            if (this.privateClient.getObservableQueries) {
-                return this.getQueriesModern(this.privateClient.getObservableQueries('active'));
-            }
-            // Try Apollo Client 3.4+ via queryManager
-            else if (queryManager.getObservableQueries) {
-                return this.getQueriesModern(queryManager.getObservableQueries('active'));
-            }
-            // Fallback to legacy method for Apollo Client < 3.4
-            else if (queryManager.queries) {
-                return this.getQueriesLegacy(queryManager.queries);
-            }
-
-            return [];
-        } catch (error) {
-            console.error('[Apollo Adapter] Error getting queries:', error);
-            return [];
-        }
-    }
-
-    /**
-     * Get queries from Apollo Client 3.4+ (modern method)
-     */
-    private getQueriesModern(observableQueries: Map<string, any>): Array<any> {
-        const queries: Array<any> = [];
-
-        observableQueries.forEach((oq: PrivateObservableQuery, queryId: string) => {
-            try {
-                const { pollingInfo } = oq;
-                const { networkStatus, error, data } = oq.getCurrentResult(false);
-
-                // Get cached data
-                let cachedData: any = null;
-                if (oq.getCacheDiff) {
-                    const diff = oq.getCacheDiff();
-                    cachedData = diff.result;
-                } else if (oq.queryInfo) {
-                    const diff = oq.queryInfo.getDiff();
-                    cachedData = diff.result;
-                }
-
-                queries.push({
-                    id: queryId,
-                    document: oq.queryInfo?.document || oq.query,
-                    variables: oq.queryInfo?.variables || oq.variables,
-                    cachedData,
-                    networkStatus,
-                    error,
-                    data,
-                    pollInterval: pollingInfo && Math.floor(pollingInfo.interval),
-                });
-            } catch (err) {
-                console.warn('[Apollo Adapter] Error processing observable query:', err);
-            }
-        });
-
-        return queries;
-    }
-
-    /**
-     * Get queries from Apollo Client < 3.4 (legacy method)
-     */
-    private getQueriesLegacy(queryMap: Map<string, any>): Array<any> {
-        const queries: Array<any> = [];
-
-        queryMap.forEach((queryData: any, queryId: string) => {
-            try {
-                const { document, variables, diff, networkStatus } = queryData;
-                queries.push({
-                    id: queryId,
-                    document,
-                    variables,
-                    cachedData: diff?.result,
-                    networkStatus: networkStatus ?? NetworkStatus.ready,
-                });
-            } catch (err) {
-                console.warn('[Apollo Adapter] Error processing legacy query:', err);
-            }
-        });
-
-        return queries;
-    }
-
-    /**
-     * Get active subscriptions from Apollo Client
-     */
-    private getSubscriptions(): Array<{
-        id: string;
-        document: DocumentNode;
-        variables: any;
-        data?: any;
-        error?: any;
-    }> {
-        try {
-            const subscriptions: Array<any> = [];
-            const queryManager = this.privateClient.queryManager as any;
-
-            // Try to access observable queries and filter for subscriptions
-            let observableQueries: Map<string, any> | undefined;
-
-            if (this.privateClient.getObservableQueries) {
-                observableQueries = this.privateClient.getObservableQueries('active');
-            } else if (queryManager?.getObservableQueries) {
-                observableQueries = queryManager.getObservableQueries('active');
-            }
-
-            console.log('[Apollo Adapter] getSubscriptions - observableQueries size:', observableQueries?.size || 0);
-
-            // Debug: Check for alternative subscription tracking
-            console.log('[Apollo Adapter] Checking for subscriptions in:', {
-                hasLocalState: !!(this.client as any).localState,
-                hasSubscriptions: !!queryManager.subscriptions,
-                hasObservableSubscriptions: !!(this.client as any).subscriptions,
-                clientKeys: Object.keys(this.client).filter(k => k.toLowerCase().includes('sub')),
-                queryManagerKeys: Object.keys(queryManager).filter(k => k.toLowerCase().includes('sub')),
-            });
-
-            if (observableQueries) {
-                observableQueries.forEach((oq: any, queryId: string) => {
-                    try {
-                        // Check if this is a subscription by looking at the operation type
-                        const document = oq.queryInfo?.document || oq.query;
-                        const operationDef = document?.definitions?.find((def: any) =>
-                            def.kind === 'OperationDefinition'
-                        );
-
-                        const operationType = operationDef?.operation;
-                        console.log('[Apollo Adapter] Observable query:', queryId, 'type:', operationType);
-
-                        if (operationType === 'subscription') {
-                            const result = oq.getCurrentResult?.(false);
-                            const subData = {
-                                id: queryId,
-                                document,
-                                variables: oq.queryInfo?.variables || oq.variables,
-                                data: result?.data || oq._lastResult?.data,
-                                error: result?.error || oq._lastError,
-                            };
-                            console.log('[Apollo Adapter] Found subscription:', queryId, 'hasData:', !!subData.data);
-                            subscriptions.push(subData);
-                        }
-                    } catch (err) {
-                        console.warn('[Apollo Adapter] Error processing subscription:', err);
-                    }
-                });
-            }
-
-            console.log('[Apollo Adapter] getSubscriptions returning:', subscriptions.length, 'subscriptions');
-            return subscriptions;
-        } catch (error) {
-            console.error('[Apollo Adapter] Error getting subscriptions:', error);
-            return [];
-        }
-    }
-
-    /**
-     * Get mutations from Apollo Client
-     */
-    private getMutations(): Array<PrivateMutationStoreValue> {
-        try {
-            const mutationStore = this.privateClient.queryManager.mutationStore;
-
-            if (!mutationStore) {
-                return [];
-            }
-
-            // Handle different Apollo Client versions
-            let mutationsObj: Record<string, PrivateMutationStoreValue>;
-
-            if (typeof (mutationStore as any).getStore === 'function') {
-                // Apollo Client 3.0 - 3.2
-                mutationsObj = (mutationStore as any).getStore();
-            } else {
-                // Apollo Client 3.3+
-                mutationsObj = mutationStore as Record<string, PrivateMutationStoreValue>;
-            }
-
-            const mutations = Object.values(mutationsObj);
-
-            // Debug: Log first mutation structure to understand available fields
-            if (mutations.length > 0) {
-                console.log('[Apollo Adapter] Mutation store sample:', {
-                    keys: Object.keys(mutations[0]),
-                    hasData: 'data' in mutations[0],
-                    hasResult: 'result' in mutations[0],
-                    loading: mutations[0].loading,
-                });
-            }
-
-            return mutations;
-        } catch (error) {
-            console.error('[Apollo Adapter] Error getting mutations:', error);
-            return [];
-        }
-    }
-
-    /**
-     * Convert query details to GraphQLOperation
-     */
-    private convertQueryToOperation(
-        queryDetails: {
-            id: string;
-            document: DocumentNode;
-            variables: any;
-            cachedData: any;
-            networkStatus: NetworkStatus;
-            error?: any;
-            data?: any;
-            pollInterval?: number;
-        },
-        startTime: number,
-        duration: number | undefined,
-        operationId: string,
-        responseData?: any
-    ): GraphQLOperation {
-        const { document, variables, cachedData, networkStatus, error, data } = queryDetails;
-
-        // Determine status from network status
-        let status: 'loading' | 'success' | 'error';
-        if (error) {
-            status = 'error';
-        } else if (networkStatus === NetworkStatus.loading ||
-            networkStatus === NetworkStatus.setVariables ||
-            networkStatus === NetworkStatus.fetchMore ||
-            networkStatus === NetworkStatus.refetch) {
-            status = 'loading';
-        } else {
-            status = 'success';
-        }
-
-        // Extract operation name from document (search all definitions to handle fragments)
-        const operationDef = document.definitions?.find((def: any) => def.kind === 'OperationDefinition');
-        const operationName = operationDef?.name?.value || 'Unnamed Query';
-
-        return {
-            id: operationId,
-            operationName,
-            operationType: 'query',
-            query: print(document),
-            variables: this.config.includeVariables ? variables : undefined,
+        // For subscriptions, emit an "active" state when first registered (listening for events)
+        // For queries/mutations, emit loading state
+        const initialOperation: GraphQLOperation = {
+            id: baseOperationId,
+            operationName: operation.operationName || 'Unnamed Operation',
+            operationType: operationType as 'query' | 'mutation' | 'subscription',
+            query: print(operation.query),
+            variables: this.config.includeVariables ? operation.variables : undefined,
             timestamp: startTime,
-            status,
-            duration,
-            data: this.config.includeResponseData ? (responseData ?? data ?? cachedData) : undefined,
-            error: error ? {
-                message: error.message || 'Query error',
-                extensions: error.extensions,
-            } : undefined,
+            status: isSubscription ? 'active' : 'loading',
+            duration: undefined,
+            ...(isSubscription && {
+                metadata: {
+                    isActive: true,
+                    eventCount: 0,
+                }
+            }),
         };
-    }
 
-    /**
-     * Convert mutation details to GraphQLOperation
-     */
-    private convertMutationToOperation(
-        mutationDetails: PrivateMutationStoreValue,
-        index: number,
-        operationId: string,
-        startTime: number,
-        duration: number | undefined
-    ): GraphQLOperation {
-        const { mutation, variables, loading, error, data, result } = mutationDetails;
+        this.notifyOperationCallbacks(initialOperation);
 
-        // Extract operation name from document (search all definitions to handle fragments)
-        const operationDef = mutation.definitions?.find((def: any) => def.kind === 'OperationDefinition');
-        const operationName = operationDef?.name?.value || 'Unnamed Mutation';
+        // Forward the operation and capture response
+        let eventCount = 0;
 
-        // Get response data from either data or result.data
-        const responseData = data || result?.data;
+        return new Observable((observer) => {
+            const subscription = forward(operation).subscribe({
+                next: (result: FetchResult) => {
+                    eventCount++;
+                    const eventTime = Date.now();
+                    const duration = eventTime - startTime;
+                    const status = result.errors ? 'error' : 'success';
 
-        return {
-            id: operationId,
-            operationName,
-            operationType: 'mutation',
-            query: print(mutation),
-            variables: this.config.includeVariables ? variables : undefined,
-            timestamp: startTime,
-            status: error ? 'error' : loading ? 'loading' : 'success',
-            duration,
-            data: this.config.includeResponseData ? responseData : undefined,
-            error: error ? {
-                message: error.message || 'Mutation error',
-            } : undefined,
-        };
-    }
+                    // For subscriptions: Create a NEW operation entry for EACH event
+                    // For queries/mutations: Update the existing operation
+                    const operationId = isSubscription
+                        ? `${baseOperationId}-event-${eventCount}`
+                        : baseOperationId;
 
-    /**
-     * Convert subscription details to GraphQLOperation
-     */
-    private convertSubscriptionToOperation(
-        subDetails: {
-            id: string;
-            document: DocumentNode;
-            variables: any;
-            data?: any;
-            error?: any;
-        },
-        operationId: string
-    ): GraphQLOperation {
-        const { document, variables, data, error } = subDetails;
+                    const operationUpdate: GraphQLOperation = {
+                        id: operationId,
+                        operationName: operation.operationName || 'Unnamed Operation',
+                        operationType: operationType as 'query' | 'mutation' | 'subscription',
+                        query: print(operation.query),
+                        variables: this.config.includeVariables ? operation.variables : undefined,
+                        timestamp: isSubscription ? eventTime : startTime, // Use event time for subscription events
+                        status,
+                        duration: isSubscription ? eventTime - startTime : duration,
+                        data: this.config.includeResponseData ? result.data : undefined,
+                        error: result.errors ? {
+                            message: result.errors.map(e => e.message).join(', '),
+                            extensions: result.errors[0]?.extensions,
+                        } : undefined,
+                        // Add metadata for subscriptions to link events to parent
+                        ...(isSubscription && {
+                            metadata: {
+                                parentId: baseOperationId,
+                                eventNumber: eventCount,
+                                isActive: true,
+                            }
+                        }),
+                    };
 
-        // Extract operation name from document
-        const operationDef = document.definitions?.find((def: any) => def.kind === 'OperationDefinition');
-        const operationName = operationDef?.name?.value || 'Unnamed Subscription';
+                    this.notifyOperationCallbacks(operationUpdate);
+                    observer.next(result);
+                },
+                error: (error: Error) => {
+                    const duration = Date.now() - startTime;
 
-        return {
-            id: operationId,
-            operationName,
-            operationType: 'subscription',
-            query: print(document),
-            variables: this.config.includeVariables ? variables : undefined,
-            timestamp: Date.now(),
-            status: error ? 'error' : 'success',
-            duration: 0,
-            data: this.config.includeResponseData ? data : undefined,
-            error: error ? {
-                message: error.message || 'Subscription error',
-            } : undefined,
-        };
+                    // Emit error operation
+                    const errorOperation: GraphQLOperation = {
+                        id: baseOperationId,
+                        operationName: operation.operationName || 'Unnamed Operation',
+                        operationType: operationType as 'query' | 'mutation' | 'subscription',
+                        query: print(operation.query),
+                        variables: this.config.includeVariables ? operation.variables : undefined,
+                        timestamp: startTime,
+                        status: 'error',
+                        duration,
+                        error: {
+                            message: error.message || 'Network error',
+                        },
+                    };
+
+                    this.notifyOperationCallbacks(errorOperation);
+                    observer.error(error);
+                },
+                complete: () => {
+                    // For subscriptions, emit a final update when they complete/unsubscribe
+                    if (isSubscription && eventCount > 0) {
+                        const duration = Date.now() - startTime;
+                        const completedOperation: GraphQLOperation = {
+                            id: `${baseOperationId}-completed`,
+                            operationName: operation.operationName || 'Unnamed Operation',
+                            operationType: 'subscription',
+                            query: print(operation.query),
+                            variables: this.config.includeVariables ? operation.variables : undefined,
+                            timestamp: Date.now(),
+                            status: 'success',
+                            duration,
+                            metadata: {
+                                parentId: baseOperationId,
+                                eventCount,
+                                isActive: false,
+                                completed: true
+                            }
+                        };
+                        this.notifyOperationCallbacks(completedOperation);
+                    }
+                    observer.complete();
+                },
+            });
+
+            return () => {
+                subscription.unsubscribe();
+            };
+        });
     }
 
     // ============================================================================
@@ -900,5 +418,60 @@ export class ApolloClientAdapter implements GraphQLClientAdapter {
             }
         });
     }
+}
+
+/**
+ * Helper function to create a Rozenite DevTools Link for Apollo Client.
+ * 
+ * This link intercepts all GraphQL operations (queries, mutations, subscriptions)
+ * and captures their complete lifecycle including request/response data.
+ * 
+ * **IMPORTANT**: Add this as the FIRST link in your Apollo Client chain to ensure
+ * all operations are captured, including duplicates that may be deduplicated later.
+ * 
+ * @example
+ * ```typescript
+ * import { ApolloClient, InMemoryCache, ApolloLink, HttpLink } from '@apollo/client';
+ * import { apolloGraphqlDevtoolLink, useGraphqlClientDevtool } from 'rozenite-graphql-client-devtool';
+ * 
+ * // 1. Create the link
+ * const rozeniteLink = apolloGraphqlDevtoolLink();
+ * 
+ * // 2. Add as FIRST link in the chain
+ * const client = new ApolloClient({
+ *   link: ApolloLink.from([
+ *     rozeniteLink,  // Must be first to capture ALL operations
+ *     new HttpLink({ uri: 'https://api.example.com/graphql' }),
+ *   ]),
+ *   cache: new InMemoryCache(),
+ * });
+ * 
+ * // 3. Initialize the devtool in your component
+ * function App() {
+ *   useGraphqlClientDevtool({
+ *     client,
+ *     clientType: 'apollo',
+ *   });
+ *   
+ *   return <YourApp />;
+ * }
+ * ```
+ * 
+ * @returns ApolloLink instance configured for Rozenite DevTools
+ */
+export function apolloGraphqlDevtoolLink(): ApolloLink {
+    return new ApolloLink((operation: Operation, forward) => {
+        // Find the adapter instance from the global registry
+        const adapter = (globalThis as any).__ROZENITE_APOLLO_ADAPTER__;
+
+        // Use duck typing instead of instanceof to avoid module bundling issues
+        if (adapter && typeof adapter.trackOperation === 'function') {
+            // Use the adapter's track operation method
+            return adapter.trackOperation(operation, forward);
+        }
+
+        // If no adapter found, just pass through (devtool not initialized yet)
+        return forward(operation);
+    });
 }
 
