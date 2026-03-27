@@ -44,6 +44,11 @@ export interface GraphQLClientAdapter {
    * @returns Cleanup function to remove the listener
    */
   onCacheChange?(callback: (entry: CacheEntry) => void): () => void;
+
+  /**
+   * Consume deferred operations from queue
+   */
+  consumeDeferredOperations(): void;
 }
 
 /**
@@ -64,10 +69,5 @@ export interface AdapterConfig {
    * Maximum number of operations to keep in memory
    */
   maxOperations?: number;
-
-  /**
-   * Polling interval in milliseconds for tracking operations (default: 500)
-   */
-  pollInterval?: number;
 }
 

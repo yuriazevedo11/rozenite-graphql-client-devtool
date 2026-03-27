@@ -22,6 +22,187 @@ import {
 type ApolloClient = ApolloClientType<any>;
 
 /**
+ * Captures GraphQL operation lifecycle events that fire before the
+ * `ApolloClientAdapter` is initialized and replays them once the adapter
+ * is ready and its `onOperation` callbacks are registered.
+ */
+class DeferredOperationQueue {
+    private counter = 0;
+    private queue: GraphQLOperation[] = [];
+    private emitter: ((op: GraphQLOperation) => void) | null = null;
+    static DEFAULT_MAX_SIZE = 100;
+
+    nextId(): string {
+        return `deferred-${this.counter++}-${Date.now()}`;
+    }
+
+    registerEmitter(emitter: (op: GraphQLOperation) => void): void {
+        this.emitter = emitter;
+    }
+
+    unregisterEmitter(): void {
+        this.emitter = null;
+    }
+
+    push(op: GraphQLOperation): void {
+        if (this.emitter) {
+            this.emitter(op);
+        } else if (this.queue.length < DeferredOperationQueue.DEFAULT_MAX_SIZE) {
+            this.queue.push(op);
+        }
+    }
+
+    consume(): void {
+        const deferredOperations = this.queue.splice(0);
+        deferredOperations.forEach(operation => this.emitter?.(operation));
+
+        this.queue = []
+        this.counter = 0;
+    }
+}
+
+const deferredOperationQueue = new DeferredOperationQueue();
+
+/**
+ * Builds a tracking Observable that wraps `forward(operation)` and calls
+ * `onEvent` for every GraphQL operation lifecycle event (initial, next, error,
+ * complete).
+ */
+function buildTrackingObservable(
+  operation: Operation,
+  forward: any,
+  baseOperationId: string,
+  config: AdapterConfig,
+  onEvent: (op: GraphQLOperation) => void,
+): Observable<FetchResult> {
+  const startTime = Date.now();
+
+  // Extract operation details
+  const operationDef = operation.query.definitions.find(
+      (def: any) => def.kind === 'OperationDefinition'
+  ) as any;
+  const operationType: OperationType = operationDef?.operation || 'query';
+  const isSubscription = operationType === 'subscription';
+
+  // For subscriptions, emit an "active" state when first registered (listening for events)
+  // For queries/mutations, emit loading state
+  const initialOperation: GraphQLOperation = {
+      id: baseOperationId,
+      operationName: operation.operationName || 'Unnamed Operation',
+      operationType,
+      query: print(operation.query),
+      variables: config.includeVariables ? operation.variables : undefined,
+      timestamp: startTime,
+      status: isSubscription ? 'active' : 'loading',
+      duration: undefined,
+      ...(isSubscription && {
+          metadata: {
+              isActive: true,
+              eventCount: 0,
+          }
+      }),
+  };
+
+  onEvent(initialOperation);
+
+  // Forward the operation and capture response
+  let eventCount = 0;
+
+  return new Observable((observer) => {
+      const subscription = forward(operation).subscribe({
+          next: (result: FetchResult) => {
+              eventCount++;
+              const eventTime = Date.now();
+              const duration = eventTime - startTime;
+              const status = result.errors ? 'error' : 'success';
+
+              // For subscriptions: Create a NEW operation entry for EACH event
+              // For queries/mutations: Update the existing operation
+              const operationId = isSubscription
+                  ? `${baseOperationId}-event-${eventCount}`
+                  : baseOperationId;
+
+              const operationUpdate: GraphQLOperation = {
+                  id: operationId,
+                  operationName: operation.operationName || 'Unnamed Operation',
+                  operationType,
+                  query: print(operation.query),
+                  variables: config.includeVariables ? operation.variables : undefined,
+                  timestamp: isSubscription ? eventTime : startTime,
+                  status,
+                  duration: isSubscription ? eventTime - startTime : duration,
+                  data: config.includeResponseData ? result.data : undefined,
+                  error: result.errors ? {
+                      message: result.errors.map(e => e.message).join(', '),
+                      extensions: result.errors[0]?.extensions,
+                  } : undefined,
+                  // Add metadata for subscriptions to link events to parent
+                  ...(isSubscription && {
+                      metadata: {
+                          parentId: baseOperationId,
+                          eventNumber: eventCount,
+                          isActive: true,
+                      }
+                  }),
+              };
+
+              onEvent(operationUpdate);
+              observer.next(result);
+          },
+          error: (error: Error) => {
+              const duration = Date.now() - startTime;
+
+              // Emit error operation
+              const errorOperation: GraphQLOperation = {
+                  id: baseOperationId,
+                  operationName: operation.operationName || 'Unnamed Operation',
+                  operationType,
+                  query: print(operation.query),
+                  variables: config.includeVariables ? operation.variables : undefined,
+                  timestamp: startTime,
+                  status: 'error',
+                  duration,
+                  error: {
+                      message: error.message || 'Network error',
+                  },
+              };
+
+              onEvent(errorOperation);
+              observer.error(error);
+          },
+          complete: () => {
+              // For subscriptions: Emit a "completed" state when all events are received
+              if (isSubscription && eventCount > 0) {
+                  const duration = Date.now() - startTime;
+                  const completedOperation: GraphQLOperation = {
+                      id: `${baseOperationId}-completed`,
+                      operationName: operation.operationName || 'Unnamed Operation',
+                      operationType: 'subscription',
+                      query: print(operation.query),
+                      variables: config.includeVariables ? operation.variables : undefined,
+                      timestamp: Date.now(),
+                      status: 'success',
+                      duration,
+                      metadata: {
+                          parentId: baseOperationId,
+                          eventCount,
+                          isActive: false,
+                          completed: true,
+                      }
+                  };
+                  onEvent(completedOperation);
+              }
+              observer.complete();
+          },
+      });
+
+      return () => {
+          subscription.unsubscribe();
+      };
+  });
+}
+
+/**
  * Apollo Client adapter for the GraphQL DevTools plugin.
  * 
  * This adapter integrates with Apollo Client using Apollo Link middleware
@@ -39,10 +220,6 @@ type ApolloClient = ApolloClientType<any>;
  *   ]),
  *   cache: new InMemoryCache(),
  * });
- * 
- * // Then initialize the adapter
- * const adapter = new ApolloClientAdapter(client);
- * adapter.initialize();
  * ```
  */
 export class ApolloClientAdapter implements GraphQLClientAdapter {
@@ -73,14 +250,25 @@ export class ApolloClientAdapter implements GraphQLClientAdapter {
         try {
             // Register this adapter globally so the link can find it
             (globalThis as any).__ROZENITE_APOLLO_ADAPTER__ = this;
+            deferredOperationQueue.registerEmitter(this.notifyOperationCallbacks.bind(this));
         } catch (error) {
             console.error('[Apollo Adapter] Failed to initialize:', error);
         }
     }
 
+    /**
+     * Replays any operations captured in the deferred operation queue through the
+     * registered callbacks. Must be called after onOperation() so that
+     * callbacks are in place when buffered events are emitted.
+     */
+    consumeDeferredOperations(): void {
+        deferredOperationQueue.consume();
+    }
+
     cleanup(): void {
         this.operationCallbacks.clear();
         this.cacheCallbacks.clear();
+        deferredOperationQueue.unregisterEmitter();
 
         // Unregister global adapter
         if ((globalThis as any).__ROZENITE_APOLLO_ADAPTER__ === this) {
@@ -99,130 +287,13 @@ export class ApolloClientAdapter implements GraphQLClientAdapter {
         const startTime = Date.now();
         const baseOperationId = `${operation.operationName || 'anonymous'}-${this.operationCounter++}-${startTime}`;
 
-        // Extract operation details
-        const operationDef = operation.query.definitions.find(
-            (def: any) => def.kind === 'OperationDefinition'
-        ) as any;
-        const operationType = operationDef?.operation || 'query';
-
-        const isSubscription = operationType === 'subscription';
-
-        // For subscriptions, emit an "active" state when first registered (listening for events)
-        // For queries/mutations, emit loading state
-        const initialOperation: GraphQLOperation = {
-            id: baseOperationId,
-            operationName: operation.operationName || 'Unnamed Operation',
-            operationType: operationType as 'query' | 'mutation' | 'subscription',
-            query: print(operation.query),
-            variables: this.config.includeVariables ? operation.variables : undefined,
-            timestamp: startTime,
-            status: isSubscription ? 'active' : 'loading',
-            duration: undefined,
-            ...(isSubscription && {
-                metadata: {
-                    isActive: true,
-                    eventCount: 0,
-                }
-            }),
-        };
-
-        this.notifyOperationCallbacks(initialOperation);
-
-        // Forward the operation and capture response
-        let eventCount = 0;
-
-        return new Observable((observer) => {
-            const subscription = forward(operation).subscribe({
-                next: (result: FetchResult) => {
-                    eventCount++;
-                    const eventTime = Date.now();
-                    const duration = eventTime - startTime;
-                    const status = result.errors ? 'error' : 'success';
-
-                    // For subscriptions: Create a NEW operation entry for EACH event
-                    // For queries/mutations: Update the existing operation
-                    const operationId = isSubscription
-                        ? `${baseOperationId}-event-${eventCount}`
-                        : baseOperationId;
-
-                    const operationUpdate: GraphQLOperation = {
-                        id: operationId,
-                        operationName: operation.operationName || 'Unnamed Operation',
-                        operationType: operationType as 'query' | 'mutation' | 'subscription',
-                        query: print(operation.query),
-                        variables: this.config.includeVariables ? operation.variables : undefined,
-                        timestamp: isSubscription ? eventTime : startTime, // Use event time for subscription events
-                        status,
-                        duration: isSubscription ? eventTime - startTime : duration,
-                        data: this.config.includeResponseData ? result.data : undefined,
-                        error: result.errors ? {
-                            message: result.errors.map(e => e.message).join(', '),
-                            extensions: result.errors[0]?.extensions,
-                        } : undefined,
-                        // Add metadata for subscriptions to link events to parent
-                        ...(isSubscription && {
-                            metadata: {
-                                parentId: baseOperationId,
-                                eventNumber: eventCount,
-                                isActive: true,
-                            }
-                        }),
-                    };
-
-                    this.notifyOperationCallbacks(operationUpdate);
-                    observer.next(result);
-                },
-                error: (error: Error) => {
-                    const duration = Date.now() - startTime;
-
-                    // Emit error operation
-                    const errorOperation: GraphQLOperation = {
-                        id: baseOperationId,
-                        operationName: operation.operationName || 'Unnamed Operation',
-                        operationType: operationType as 'query' | 'mutation' | 'subscription',
-                        query: print(operation.query),
-                        variables: this.config.includeVariables ? operation.variables : undefined,
-                        timestamp: startTime,
-                        status: 'error',
-                        duration,
-                        error: {
-                            message: error.message || 'Network error',
-                        },
-                    };
-
-                    this.notifyOperationCallbacks(errorOperation);
-                    observer.error(error);
-                },
-                complete: () => {
-                    // For subscriptions, emit a final update when they complete/unsubscribe
-                    if (isSubscription && eventCount > 0) {
-                        const duration = Date.now() - startTime;
-                        const completedOperation: GraphQLOperation = {
-                            id: `${baseOperationId}-completed`,
-                            operationName: operation.operationName || 'Unnamed Operation',
-                            operationType: 'subscription',
-                            query: print(operation.query),
-                            variables: this.config.includeVariables ? operation.variables : undefined,
-                            timestamp: Date.now(),
-                            status: 'success',
-                            duration,
-                            metadata: {
-                                parentId: baseOperationId,
-                                eventCount,
-                                isActive: false,
-                                completed: true
-                            }
-                        };
-                        this.notifyOperationCallbacks(completedOperation);
-                    }
-                    observer.complete();
-                },
-            });
-
-            return () => {
-                subscription.unsubscribe();
-            };
-        });
+        return buildTrackingObservable(
+            operation,
+            forward,
+            baseOperationId,
+            this.config,
+            this.notifyOperationCallbacks.bind(this),
+        );
     }
 
     // ============================================================================
@@ -470,8 +541,14 @@ export function apolloGraphqlDevtoolLink(): ApolloLink {
             return adapter.trackOperation(operation, forward);
         }
 
-        // If no adapter found, just pass through (devtool not initialized yet)
-        return forward(operation);
+        // Adapter not yet initialized — buffer the operation lifecycle events so
+        // they can be replayed once consumeDeferredOperations() is called by the hook.
+        return buildTrackingObservable(
+            operation,
+            forward,
+            deferredOperationQueue.nextId(),
+            { includeVariables: true, includeResponseData: true },
+            (op) => deferredOperationQueue.push(op),
+        );
     });
 }
-

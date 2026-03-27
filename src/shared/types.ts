@@ -79,7 +79,7 @@ export interface GraphQLType {
   name: string;
   kind: GraphQLTypeKind;
   fields?: GraphQLField[];
-  description?: string;
+  description?: string | null;
   interfaces?: string[];
   possibleTypes?: string[];
   enumValues?: string[];
@@ -91,4 +91,3 @@ export interface GraphQLSchema {
   subscriptionType?: GraphQLType;
   types: GraphQLType[];
 }
-

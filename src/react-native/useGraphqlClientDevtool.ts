@@ -133,6 +133,9 @@ export const useGraphqlClientDevtool = (config: UseGraphqlClientDevtoolConfig) =
             }
         });
 
+        // Consume operations captured before the hook mounted
+        adapter.consumeDeferredOperations();
+
         // Set up cache change tracking (if supported)
         let unsubscribeCache: (() => void) | undefined;
         if (adapter.onCacheChange) {
