@@ -4,8 +4,8 @@ import { pluginId } from '../shared/constants';
 import { GraphQLDevToolEventMap } from '../shared/events';
 import { GraphQLClientAdapter } from './adapters/types';
 import { ApolloClientAdapter } from './adapters/apollo-adapter';
-// Type aliases for GraphQL clients (optional dependencies - will be 'any' until installed)
 
+// Type aliases for GraphQL clients (optional dependencies - will be 'any' until installed)
 type SupportedClientType = 'apollo' | 'custom';
 
 interface UseGraphqlClientDevtoolConfig {
@@ -35,6 +35,12 @@ interface UseGraphqlClientDevtoolConfig {
      * @default true
      */
     includeResponseData?: boolean;
+
+    /**
+     * Whether to run the introspection query for schema exploration
+     * @default true
+     */
+    runIntrospectionQuery?: boolean;
 }
 
 /**
@@ -67,6 +73,7 @@ export const useGraphqlClientDevtool = (config: UseGraphqlClientDevtoolConfig) =
         adapter: customAdapter,
         includeVariables = true,
         includeResponseData = true,
+        runIntrospectionQuery = true,
     } = config;
 
     const pluginClient = useRozeniteDevToolsClient<GraphQLDevToolEventMap>({
@@ -92,7 +99,11 @@ export const useGraphqlClientDevtool = (config: UseGraphqlClientDevtoolConfig) =
             }
             adapter = customAdapter;
         } else if (clientType === 'apollo') {
-            adapter = new ApolloClientAdapter(client, { includeVariables, includeResponseData });
+            adapter = new ApolloClientAdapter(client, {
+                includeVariables,
+                includeResponseData,
+                runIntrospectionQuery
+            });
         } else {
             console.error(`[GraphQL DevTools] Unsupported client type: ${clientType}`);
             return;
@@ -132,6 +143,9 @@ export const useGraphqlClientDevtool = (config: UseGraphqlClientDevtoolConfig) =
                 });
             }
         });
+
+        // Consume operations captured before the hook mounted
+        adapter.consumeDeferredOperations();
 
         // Set up cache change tracking (if supported)
         let unsubscribeCache: (() => void) | undefined;
@@ -215,4 +229,3 @@ export const useGraphqlClientDevtool = (config: UseGraphqlClientDevtoolConfig) =
 
     return pluginClient;
 };
-

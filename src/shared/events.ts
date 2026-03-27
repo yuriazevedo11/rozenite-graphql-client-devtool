@@ -27,7 +27,7 @@ export type GraphQLDevToolEventMap = {
   };
   'operation-error': {
     id: string;
-    error: GraphQLError;
+    error: GraphQLError | undefined;
     duration: number;
   };
 
