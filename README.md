@@ -118,6 +118,7 @@ The main hook for integrating your GraphQL client with Rozenite DevTools.
 | `adapter` | `GraphQLClientAdapter` | `undefined` | Custom adapter implementation (required if `clientType` is `'custom'`) |
 | `includeVariables` | `boolean` | `true` | Whether to include variables in operation tracking |
 | `includeResponseData` | `boolean` | `true` | Whether to include response data in operation tracking |
+| `runIntrospectionQuery` | `boolean` | `true` | Whether to run the introspection query for schema exploration |
 
 ##### Example with Options
 
@@ -127,6 +128,7 @@ useGraphqlClientDevtool({
   clientType: 'apollo',
   includeVariables: true,
   includeResponseData: true,
+  runIntrospectionQuery: true,
 });
 ```
 

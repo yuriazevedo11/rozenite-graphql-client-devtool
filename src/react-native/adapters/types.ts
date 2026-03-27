@@ -66,6 +66,11 @@ export interface AdapterConfig {
   includeResponseData?: boolean;
 
   /**
+   * Whether to include introspection data in operation tracking
+   */
+  runIntrospectionQuery?: boolean;
+
+  /**
    * Maximum number of operations to keep in memory
    */
   maxOperations?: number;

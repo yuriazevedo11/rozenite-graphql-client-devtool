@@ -238,6 +238,7 @@ export class ApolloClientAdapter implements GraphQLClientAdapter {
         this.config = {
             includeVariables: config.includeVariables ?? true,
             includeResponseData: config.includeResponseData ?? true,
+            runIntrospectionQuery: config.runIntrospectionQuery ?? true,
             maxOperations: config.maxOperations ?? 1000,
         };
     }
@@ -324,6 +325,10 @@ export class ApolloClientAdapter implements GraphQLClientAdapter {
     }
 
     async getSchema(): Promise<GraphQLSchema> {
+        if (!this.config.runIntrospectionQuery) {
+            return { types: [] };
+        }
+
         try {
             // Execute introspection query
             const result = await this.client.query({
